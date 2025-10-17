@@ -314,6 +314,12 @@ Specify icon theme to be used. If not specified default theme from DE is used,
 
 Use Pango markup to format output wherever possible.
 
+`-daemon`
+
+Start **rofi** in daemon mode so subsequent `rofi -show …` invocations reuse the
+running process instead of spawning a new instance. While the daemon is active,
+each `-show` call forwards to it via a control socket located next to the pidfile.
+
 `-normal-window`
 
 Make **rofi** react like a normal application window. Useful for scripts like

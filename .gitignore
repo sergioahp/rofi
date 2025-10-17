@@ -1,6 +1,7 @@
 /build*/
 /.cache/
 /.vscode/
+mcp-gdb/
 
 # I want to ignore log files
 *.log

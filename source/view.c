@@ -1518,8 +1518,10 @@ void rofi_view_maybe_update(RofiViewState *state) {
 
     // cleanup, if no more state to display.
     if (state == NULL) {
-      // Quit main-loop.
-      rofi_quit_main_loop();
+      if (!rofi_is_daemon_mode()) {
+        // Quit main-loop.
+        rofi_quit_main_loop();
+      }
       return;
     }
   }

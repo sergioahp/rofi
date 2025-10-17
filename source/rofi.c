@@ -42,6 +42,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <gio/gio.h>
 #include <glib-unix.h>
 
 #ifdef USE_NK_GIT_VERSION
@@ -90,6 +91,9 @@ GList *list_of_error_msgs = NULL;
 GList *list_of_warning_msgs = NULL;
 
 static void rofi_collectmodes_destroy(void);
+static int add_mode(const char *token);
+static void rofi_daemon_cleanup(void);
+static void rofi_daemon_set_socket_from_pidfile(void);
 void rofi_add_error_message(GString *str) {
   list_of_error_msgs = g_list_append(list_of_error_msgs, str);
 }
@@ -145,10 +149,20 @@ GMainLoop *main_loop = NULL;
 int rofi_is_in_dmenu_mode = FALSE;
 /** Rofi's return code */
 int return_code = EXIT_SUCCESS;
+/** Flag indicating rofi is running as a daemon. */
+static gboolean daemon_mode = FALSE;
+/** Path to the UNIX socket used for daemon control. */
+static char *daemon_socket_path = NULL;
+/** Socket service handling incoming daemon commands. */
+static GSocketService *daemon_service = NULL;
+/** True when this instance owns the daemon socket path. */
+static gboolean daemon_socket_owned = FALSE;
 
 void process_result(RofiViewState *state);
 
 void rofi_set_return_code(int code) { return_code = code; }
+
+gboolean rofi_is_daemon_mode(void) { return daemon_mode; }
 
 unsigned int rofi_get_num_enabled_modes(void) { return num_modes; }
 
@@ -318,6 +332,9 @@ static void print_main_application_options(int is_term) {
   print_help_msg("-e", "[string]",
                  "Show a dialog displaying the passed message and exit.", NULL,
                  is_term);
+  print_help_msg("-daemon", "",
+                 "Start rofi in daemon mode and wait for remote commands.",
+                 NULL, is_term);
   print_help_msg("-markup", "", "Enable pango markup where possible.", NULL,
                  is_term);
   print_help_msg("-normal-window", "",
@@ -549,6 +566,7 @@ static void help_print_no_arguments(void) {
  * Cleanup globally allocated memory.
  */
 static void cleanup(void) {
+  rofi_daemon_cleanup();
   for (unsigned int i = 0; i < num_modes; i++) {
     mode_destroy(modes[i]);
   }
@@ -783,6 +801,273 @@ static gboolean setup_modes(void) {
  **/
 void rofi_quit_main_loop(void) { g_main_loop_quit(main_loop); }
 
+static gboolean rofi_daemon_show_mode(const char *mode_name) {
+  ModeMode index = 0;
+  if (mode_name != NULL && *mode_name != '\0') {
+    int mode_index = mode_lookup(mode_name);
+    if (mode_index < 0) {
+      mode_index = add_mode(mode_name);
+      if (mode_index >= 0) {
+        help_print_disabled_mode(mode_name);
+      } else {
+        help_print_mode_not_found(mode_name);
+        return FALSE;
+      }
+    }
+    index = (ModeMode)mode_index;
+  } else {
+    if (num_modes == 0) {
+      g_warning("Daemon request ignored: no modes enabled.");
+      return FALSE;
+    }
+  }
+  if (rofi_view_get_active() != NULL) {
+    g_debug("Daemon request ignored: a view is already active.");
+    return FALSE;
+  }
+  run_mode_index(index);
+  return TRUE;
+}
+
+static gboolean rofi_daemon_write_reply(GOutputStream *output,
+                                        const char *reply) {
+  if (output == NULL || reply == NULL) {
+    return FALSE;
+  }
+  gsize written = 0;
+  GError *error = NULL;
+  gboolean ok = g_output_stream_write_all(output, reply, strlen(reply),
+                                          &written, NULL, &error);
+  if (!ok) {
+    if (error != NULL) {
+      g_debug("Failed to write daemon reply: %s", error->message);
+      g_clear_error(&error);
+    }
+    return FALSE;
+  }
+  if (!g_output_stream_flush(output, NULL, &error)) {
+    if (error != NULL) {
+      g_debug("Failed to flush daemon reply: %s", error->message);
+      g_clear_error(&error);
+    }
+  }
+  return TRUE;
+}
+
+static void rofi_daemon_set_socket_from_pidfile(void) {
+  if (pidfile == NULL) {
+    return;
+  }
+  char *dir = g_path_get_dirname(pidfile);
+  if (dir == NULL) {
+    return;
+  }
+  char *new_path = g_build_filename(dir, "rofi-daemon.sock", NULL);
+  g_free(dir);
+  if (new_path == NULL) {
+    return;
+  }
+  if (daemon_socket_owned && daemon_socket_path != NULL &&
+      g_strcmp0(daemon_socket_path, new_path) != 0) {
+    g_unlink(daemon_socket_path);
+    daemon_socket_owned = FALSE;
+  }
+  g_free(daemon_socket_path);
+  daemon_socket_path = new_path;
+}
+
+static gboolean rofi_daemon_forward_show_request(const char *mode_name) {
+  if (daemon_socket_path == NULL) {
+    return FALSE;
+  }
+  GSocketClient *client = g_socket_client_new();
+  GSocketAddress *address = g_unix_socket_address_new(daemon_socket_path);
+  GError *error = NULL;
+  GSocketConnection *connection = g_socket_client_connect(
+      client, G_SOCKET_CONNECTABLE(address), NULL, &error);
+  g_object_unref(address);
+  if (connection == NULL) {
+    if (error != NULL) {
+      g_warning("Failed to connect to rofi daemon at %s: %s",
+                daemon_socket_path, error->message);
+      g_clear_error(&error);
+    }
+    g_object_unref(client);
+    return FALSE;
+  }
+  GOutputStream *output =
+      g_io_stream_get_output_stream(G_IO_STREAM(connection));
+  gchar *command = NULL;
+  if (mode_name != NULL && mode_name[0] != '\0') {
+    command = g_strdup_printf("SHOW %s\n", mode_name);
+  } else {
+    command = g_strdup("SHOW\n");
+  }
+  gsize written = 0;
+  gboolean ok = g_output_stream_write_all(output, command, strlen(command),
+                                          &written, NULL, &error);
+  g_free(command);
+  if (!ok) {
+    if (error != NULL) {
+      g_warning("Failed to write daemon command: %s", error->message);
+      g_clear_error(&error);
+    }
+    g_io_stream_close(G_IO_STREAM(connection), NULL, NULL);
+    g_object_unref(connection);
+    g_object_unref(client);
+    return FALSE;
+  }
+  if (!g_output_stream_flush(output, NULL, &error) && error != NULL) {
+    g_warning("Failed to flush daemon command: %s", error->message);
+    g_clear_error(&error);
+  }
+  GInputStream *input =
+      g_io_stream_get_input_stream(G_IO_STREAM(connection));
+  GDataInputStream *data = g_data_input_stream_new(input);
+  gsize len = 0;
+  gchar *reply = g_data_input_stream_read_line(data, &len, NULL, &error);
+  gboolean success = FALSE;
+  if (reply != NULL) {
+    success = (g_ascii_strcasecmp(reply, "OK") == 0);
+  }
+  if (error != NULL) {
+    g_warning("Failed to read daemon reply: %s", error->message);
+    g_clear_error(&error);
+  }
+  g_free(reply);
+  g_object_unref(data);
+  if (!g_io_stream_close(G_IO_STREAM(connection), NULL, &error) &&
+      error != NULL) {
+    g_warning("Failed to close daemon client connection: %s",
+              error->message);
+    g_clear_error(&error);
+  }
+  g_object_unref(connection);
+  g_object_unref(client);
+  return success;
+}
+
+static gboolean rofi_daemon_process_command(const gchar *line,
+                                            GOutputStream *output) {
+  if (line == NULL) {
+    rofi_daemon_write_reply(output, "FAIL\n");
+    return FALSE;
+  }
+  gchar *trimmed = g_strstrip(g_strdup(line));
+  gboolean handled = FALSE;
+  if (trimmed == NULL || trimmed[0] == '\0') {
+    rofi_daemon_write_reply(output, "FAIL\n");
+    g_free(trimmed);
+    return FALSE;
+  }
+  if (g_ascii_strncasecmp(trimmed, "SHOW", 4) == 0) {
+    const char *mode = trimmed + 4;
+    while (g_ascii_isspace(*mode)) {
+      mode++;
+    }
+    handled = rofi_daemon_show_mode((*mode != '\0') ? mode : NULL);
+    rofi_daemon_write_reply(output, handled ? "OK\n" : "FAIL\n");
+  } else if (g_ascii_strcasecmp(trimmed, "PING") == 0) {
+    rofi_daemon_write_reply(output, "PONG\n");
+    handled = TRUE;
+  } else if (g_ascii_strcasecmp(trimmed, "QUIT") == 0 ||
+             g_ascii_strcasecmp(trimmed, "EXIT") == 0) {
+    rofi_daemon_write_reply(output, "BYE\n");
+    rofi_quit_main_loop();
+    handled = TRUE;
+  } else {
+    g_debug("Unknown daemon command: '%s'", trimmed);
+    rofi_daemon_write_reply(output, "UNKNOWN\n");
+  }
+  g_free(trimmed);
+  return handled;
+}
+
+static gboolean rofi_daemon_incoming(GSocketService *service,
+                                     GSocketConnection *connection,
+                                     GObject *source_object,
+                                     G_GNUC_UNUSED gpointer user_data) {
+  GInputStream *input =
+      g_io_stream_get_input_stream(G_IO_STREAM(connection));
+  GOutputStream *output =
+      g_io_stream_get_output_stream(G_IO_STREAM(connection));
+  GDataInputStream *data = g_data_input_stream_new(input);
+  GError *error = NULL;
+  gsize length = 0;
+  gchar *line = g_data_input_stream_read_line(data, &length, NULL, &error);
+  if (error != NULL) {
+    g_warning("Failed to read daemon command: %s", error->message);
+    g_clear_error(&error);
+  }
+  rofi_daemon_process_command(line, output);
+  g_free(line);
+  if (!g_io_stream_close(G_IO_STREAM(connection), NULL, &error)) {
+    if (error != NULL) {
+      g_debug("Failed to close daemon connection: %s", error->message);
+      g_clear_error(&error);
+    }
+  }
+  g_object_unref(data);
+  g_object_unref(connection);
+  return TRUE;
+}
+
+static gboolean rofi_daemon_setup(void) {
+  if (daemon_service != NULL) {
+    return TRUE;
+  }
+  if (daemon_socket_path == NULL) {
+    g_warning("Cannot enable daemon mode without a socket path.");
+    return FALSE;
+  }
+  // Remove any stale socket.
+  g_unlink(daemon_socket_path);
+  daemon_service = g_socket_service_new();
+  if (daemon_service == NULL) {
+    g_warning("Failed to allocate socket service for daemon mode.");
+    return FALSE;
+  }
+  g_signal_connect(daemon_service, "incoming",
+                   G_CALLBACK(rofi_daemon_incoming), NULL);
+  GSocketAddress *address =
+      g_unix_socket_address_new(daemon_socket_path);
+  GError *error = NULL;
+  gboolean added = g_socket_listener_add_address(
+      G_SOCKET_LISTENER(daemon_service), address, G_SOCKET_TYPE_STREAM,
+      G_SOCKET_PROTOCOL_DEFAULT, NULL, NULL, &error);
+  g_object_unref(address);
+  if (!added) {
+    if (error != NULL) {
+      g_warning("Failed to bind daemon socket '%s': %s",
+                daemon_socket_path, error->message);
+      g_clear_error(&error);
+    }
+    g_object_unref(daemon_service);
+    daemon_service = NULL;
+    return FALSE;
+  }
+  daemon_socket_owned = TRUE;
+  g_socket_service_start(daemon_service);
+  g_debug("Rofi daemon listening on %s", daemon_socket_path);
+  return TRUE;
+}
+
+static void rofi_daemon_cleanup(void) {
+  if (daemon_service != NULL) {
+    g_socket_service_stop(daemon_service);
+    g_object_unref(daemon_service);
+    daemon_service = NULL;
+  }
+  if (daemon_socket_owned && daemon_socket_path != NULL) {
+    g_unlink(daemon_socket_path);
+  }
+  daemon_socket_owned = FALSE;
+  if (daemon_socket_path != NULL) {
+    g_free(daemon_socket_path);
+    daemon_socket_path = NULL;
+  }
+}
+
 static gboolean main_loop_signal_handler_int(G_GNUC_UNUSED gpointer data) {
   // Break out of loop.
   g_main_loop_quit(main_loop);
@@ -899,7 +1184,7 @@ static gboolean startup(G_GNUC_UNUSED gpointer data) {
     }
   } else if (find_arg("-show") >= 0 && num_modes > 0) {
     run_mode_index(0);
-  } else {
+  } else if (!rofi_is_daemon_mode()) {
     help_print_no_arguments();
 
     // g_main_loop_quit(main_loop);
@@ -934,6 +1219,7 @@ static void rofi_custom_log_function(const char *log_domain,
  */
 int main(int argc, char *argv[]) {
   cmd_set_arguments(argc, argv);
+  daemon_mode = (find_arg("-daemon") >= 0);
   if (find_arg("-log") >= 0) {
     char *logfile = NULL;
     find_arg_str("-log", &logfile);
@@ -1015,8 +1301,24 @@ int main(int argc, char *argv[]) {
       pidfile = g_build_filename(path, "rofi.pid", NULL);
     }
   }
+  rofi_daemon_set_socket_from_pidfile();
   config_parser_add_option(xrm_String, "pid", (void **)&pidfile,
                            "Pidfile location");
+
+  if (!daemon_mode) {
+    rofi_daemon_set_socket_from_pidfile();
+    char *show_mode = NULL;
+    gboolean has_show = FALSE;
+    if (find_arg_str("-show", &show_mode)) {
+      has_show = TRUE;
+    } else if (find_arg("-show") >= 0) {
+      has_show = TRUE;
+      show_mode = NULL;
+    }
+    if (has_show && rofi_daemon_forward_show_request(show_mode)) {
+      return EXIT_SUCCESS;
+    }
+  }
 
   /** default configuration */
   if (find_arg("-no-default-config") < 0) {
@@ -1163,6 +1465,7 @@ int main(int argc, char *argv[]) {
     // This might clear existing errors.
     config_parse_cmd_options();
   }
+  rofi_daemon_set_socket_from_pidfile();
 
   if (rofi_theme == NULL || rofi_theme->num_widgets == 0) {
     g_debug("Failed to load theme. Try to load default: ");
@@ -1317,6 +1620,15 @@ int main(int argc, char *argv[]) {
   rofi_theme_parse_process_conditionals();
   rofi_theme_parse_process_links();
   TICK_N("Theme setup");
+
+  if (daemon_mode) {
+    rofi_daemon_set_socket_from_pidfile();
+    if (!rofi_daemon_setup()) {
+      cleanup();
+      return EXIT_FAILURE;
+    }
+    g_message("Rofi daemon ready; waiting for commands.");
+  }
 
   // Setup signal handling sources.
   // SIGINT

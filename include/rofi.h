@@ -104,6 +104,7 @@ void rofi_clear_warning_messages(void);
 void rofi_set_return_code(int code);
 
 void rofi_quit_main_loop(void);
+gboolean rofi_is_daemon_mode(void);
 
 /**
  * @param name Search for mode with this name.
