@@ -1008,7 +1008,6 @@ static gboolean rofi_daemon_incoming(GSocketService *service,
     }
   }
   g_object_unref(data);
-  g_object_unref(connection);
   return TRUE;
 }
 

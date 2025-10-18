@@ -10,6 +10,10 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
+        pythonEnv = pkgs.python3.withPackages (ps: [
+          ps.pygobject3
+          ps.pycairo
+        ]);
         baseTools = with pkgs; [
           meson
           ninja
@@ -21,6 +25,7 @@
           gnumake
           nodejs
           gdb
+          pythonEnv
         ];
         coreLibs = with pkgs; [
           glib
@@ -52,6 +57,22 @@
       in {
         devShells.default = pkgs.mkShell {
           packages = baseTools ++ coreLibs ++ x11Libs ++ waylandLibs;
+          nativeBuildInputs = [ pkgs.gobject-introspection ];
+          buildInputs = [
+            pkgs.glib
+            pkgs.gdk-pixbuf
+            pkgs.pango
+            pkgs.cairo
+            pkgs.wayland
+          ];
+          shellHook = ''
+            echo "[devshell] GI_TYPELIB_PATH entries:" >&2
+            if [ -n "$GI_TYPELIB_PATH" ]; then
+              tr ':' '\n' <<<"$GI_TYPELIB_PATH" | sed 's/^/  /' >&2
+            else
+              echo '  (empty)' >&2
+            fi
+          '';
         };
       });
 }

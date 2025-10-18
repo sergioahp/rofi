@@ -990,6 +990,9 @@ static void rofi_view_clipboard_callback(char *clipboard_data,
 
 static void rofi_view_trigger_global_action(KeyBindingAction action) {
   RofiViewState *state = rofi_view_get_active();
+  if (state == NULL) {
+    return;
+  }
   switch (action) {
   // Handling of paste
   case PASTE_PRIMARY:
