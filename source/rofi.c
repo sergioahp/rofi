@@ -157,6 +157,8 @@ static char *daemon_socket_path = NULL;
 static GSocketService *daemon_service = NULL;
 /** True when this instance owns the daemon socket path. */
 static gboolean daemon_socket_owned = FALSE;
+/** True when daemon is busy processing a request. */
+static gboolean daemon_busy = FALSE;
 
 void process_result(RofiViewState *state);
 
@@ -291,21 +293,19 @@ void process_result(RofiViewState *state) {
       return;
     }
     // On exit, free current view, and pop to one above.
-    // In daemon mode, explicitly hide the window before cleanup
-    if (daemon_mode) {
-      rofi_view_hide();
-    }
     rofi_view_remove_active(state);
     rofi_view_free(state);
+    if (daemon_mode) {
+      daemon_busy = FALSE;
+    }
     return;
   }
   //    rofi_view_set_active ( NULL );
-  // In daemon mode, explicitly hide the window before cleanup
-  if (daemon_mode) {
-    rofi_view_hide();
-  }
   rofi_view_remove_active(state);
   rofi_view_free(state);
+  if (daemon_mode) {
+    daemon_busy = FALSE;
+  }
 }
 
 /**
@@ -829,10 +829,15 @@ static gboolean rofi_daemon_show_mode(const char *mode_name) {
       return FALSE;
     }
   }
+  if (daemon_busy) {
+    g_debug("Daemon request ignored: daemon is busy processing another request.");
+    return FALSE;
+  }
   if (rofi_view_get_active() != NULL) {
     g_debug("Daemon request ignored: a view is already active.");
     return FALSE;
   }
+  daemon_busy = TRUE;
   run_mode_index(index);
   return TRUE;
 }
