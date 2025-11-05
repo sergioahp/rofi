@@ -379,6 +379,9 @@ static void wayland_keyboard_enter(void *data, struct wl_keyboard *keyboard,
   wayland->last_seat = self;
   self->serial = serial;
 
+  // Replay any buffered events now that we have keyboard focus
+  wayland_replay_buffered_events(self);
+
   uint32_t *key, *kend;
   for (key = keys->data, kend = key + keys->size / sizeof(*key); key < kend;
        ++key) {
@@ -455,8 +458,13 @@ static gboolean wayland_key_repeat_delay(void *data) {
 static void wayland_keyboard_key(void *data, struct wl_keyboard *keyboard,
                                  uint32_t serial, uint32_t time, uint32_t key,
                                  enum wl_keyboard_key_state kstate) {
-  RofiViewState *state = rofi_view_get_active();
   wayland_seat *self = data;
+
+  // Try to replay any buffered events first
+  // (becomes effective once view is ready)
+  wayland_replay_buffered_events(self);
+
+  RofiViewState *state = rofi_view_get_active();
 
   wayland->last_seat = self;
   self->serial = serial;
@@ -489,6 +497,18 @@ static void wayland_keyboard_key(void *data, struct wl_keyboard *keyboard,
       guint source_id =
           g_timeout_add(self->repeat.delay, wayland_key_repeat_delay, data);
       self->repeat.source = g_main_context_find_source_by_id(NULL, source_id);
+    } else if (text != NULL && self->buffered_events != NULL) {
+      // View not ready yet - buffer this input event
+      BufferedInputEvent *event = g_new0(BufferedInputEvent, 1);
+      event->type = BUFFERED_EVENT_KEY;
+      event->data.key.time = time;
+      event->data.key.key = key;
+      event->data.key.state = kstate;
+      event->data.key.text = text; // Take ownership of text
+      g_queue_push_tail(self->buffered_events, event);
+      g_debug("Buffered key event (key=%u, text='%s'), queue length: %u",
+              key, text, g_queue_get_length(self->buffered_events));
+      return; // Don't free text, it's owned by buffered event
     }
   }
 
@@ -897,6 +917,38 @@ static const struct wl_pointer_listener wayland_pointer_listener = {
     .axis_discrete = wayland_pointer_axis_discrete,
 };
 
+/**
+ * Replay buffered keyboard events to the active view.
+ * This is called when the view becomes ready to process input.
+ */
+static void wayland_replay_buffered_events(wayland_seat *self) {
+  if (self->buffered_events == NULL || g_queue_is_empty(self->buffered_events)) {
+    return;
+  }
+
+  RofiViewState *state = rofi_view_get_active();
+  if (state == NULL) {
+    // View still not ready, events remain buffered
+    return;
+  }
+
+  g_debug("Replaying %u buffered input events", g_queue_get_length(self->buffered_events));
+
+  BufferedInputEvent *event;
+  while ((event = g_queue_pop_head(self->buffered_events)) != NULL) {
+    if (event->type == BUFFERED_EVENT_KEY && event->data.key.text != NULL) {
+      rofi_view_handle_text(state, event->data.key.text);
+      g_free(event->data.key.text);
+    } else if (event->type == BUFFERED_EVENT_TEXT && event->data.text.text != NULL) {
+      rofi_view_handle_text(state, event->data.text.text);
+      g_free(event->data.text.text);
+    }
+    g_free(event);
+  }
+
+  rofi_view_maybe_update(state);
+}
+
 static void wayland_keyboard_release(wayland_seat *self) {
   if (self->keyboard == NULL) {
     return;
@@ -908,6 +960,21 @@ static void wayland_keyboard_release(wayland_seat *self) {
   if (self->repeat.source != NULL) {
     g_source_destroy(self->repeat.source);
     self->repeat.source = NULL;
+  }
+
+  // Clean up buffered events
+  if (self->buffered_events != NULL) {
+    BufferedInputEvent *event;
+    while ((event = g_queue_pop_head(self->buffered_events)) != NULL) {
+      if (event->type == BUFFERED_EVENT_KEY && event->data.key.text != NULL) {
+        g_free(event->data.key.text);
+      } else if (event->type == BUFFERED_EVENT_TEXT && event->data.text.text != NULL) {
+        g_free(event->data.text.text);
+      }
+      g_free(event);
+    }
+    g_queue_free(self->buffered_events);
+    self->buffered_events = NULL;
   }
 
   self->keyboard = NULL;
@@ -1139,6 +1206,8 @@ static void wayland_seat_capabilities(void *data, struct wl_seat *seat,
       zwp_text_input_v3_add_listener(self->text_input, &text_input_listener,
                                      self);
     }
+    // Initialize input buffer for capturing early keyboard events
+    self->buffered_events = g_queue_new();
   } else if ((!(capabilities & WL_SEAT_CAPABILITY_POINTER)) &&
              (self->keyboard != NULL)) {
     wayland_keyboard_release(self);
@@ -1228,9 +1297,18 @@ static void text_input_commit_string(void *data,
     return;
   }
 
+  wayland_seat *self = data;
   RofiViewState *state = rofi_view_get_active();
   if (state) {
     rofi_view_handle_text(state, text);
+  } else if (self->buffered_events != NULL) {
+    // View not ready yet - buffer this text input from IME
+    BufferedInputEvent *event = g_new0(BufferedInputEvent, 1);
+    event->type = BUFFERED_EVENT_TEXT;
+    event->data.text.text = g_strdup(text);
+    g_queue_push_tail(self->buffered_events, event);
+    g_debug("Buffered text input event (text='%s'), queue length: %u",
+            text, g_queue_get_length(self->buffered_events));
   }
 }
 

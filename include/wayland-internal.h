@@ -38,6 +38,30 @@ typedef struct {
   void *offer;
 } clipboard_data;
 
+/**
+ * Buffered input event for capturing early keyboard input
+ * before the view is ready to process events.
+ */
+typedef enum {
+  BUFFERED_EVENT_KEY,      // Regular key press
+  BUFFERED_EVENT_TEXT,     // Text input from IME
+} BufferedEventType;
+
+typedef struct {
+  BufferedEventType type;
+  union {
+    struct {
+      uint32_t time;       // Event timestamp
+      uint32_t key;        // Key code
+      uint32_t state;      // Press/release state
+      gchar *text;         // Translated text (may be NULL)
+    } key;
+    struct {
+      gchar *text;         // Text from IME
+    } text;
+  } data;
+} BufferedInputEvent;
+
 typedef struct {
   GMainLoop *main_loop;
   GWaterWaylandSource *main_loop_source;
@@ -124,6 +148,13 @@ struct _wayland_seat {
   } wheel_continuous;
 
   struct zwp_text_input_v3 *text_input;
+
+  /**
+   * Buffer for capturing keyboard input that arrives before
+   * the view is ready. Events are queued here and replayed
+   * once rofi_view_get_active() returns non-NULL.
+   */
+  GQueue *buffered_events;
 };
 
 /* Supported interface versions */
