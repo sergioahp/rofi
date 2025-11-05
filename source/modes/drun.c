@@ -509,7 +509,23 @@ static void exec_cmd_entry(DRunModePrivateData *pd, DRunModeEntry *e,
     // terminal.
     gboolean terminal =
         g_key_file_get_boolean(e->key_file, e->action, "Terminal", NULL);
-    launched = helper_execute_command(exec_path, fp, terminal, sn ? &context : NULL);
+
+    // Apply launch prefix if configured
+    const gchar *command_to_launch = fp;
+    gchar *prefixed_command = NULL;
+    if (config.drun_launch_prefix != NULL &&
+        strlen(config.drun_launch_prefix) > 0) {
+      prefixed_command = g_strdup_printf("%s %s",
+                                         config.drun_launch_prefix, fp);
+      command_to_launch = prefixed_command;
+    }
+
+    launched = helper_execute_command(exec_path, command_to_launch, terminal, sn ? &context : NULL);
+
+    // Free prefixed command if it was allocated
+    if (prefixed_command != NULL) {
+      g_free(prefixed_command);
+    }
   }
   if (launched == TRUE) {
     char *drun_cach_path = g_build_filename(cache_dir, DRUN_CACHE_FILE, NULL);

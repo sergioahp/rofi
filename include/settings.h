@@ -137,6 +137,8 @@ typedef struct {
   char *drun_display_format;
   /** Desktop Link launch command */
   char *drun_url_launcher;
+  /** Command prefix to prepend when launching drun applications */
+  char *drun_launch_prefix;
 
   /** Search case sensitivity */
   unsigned int case_sensitive;

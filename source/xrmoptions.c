@@ -268,6 +268,12 @@ static XrmOption xrmOptions[] = {
      NULL,
      "Command to open a Desktop Entry that is a Link.",
      CONFIG_DEFAULT},
+    {xrm_String,
+     "drun-launch-prefix",
+     {.str = &config.drun_launch_prefix},
+     NULL,
+     "Command prefix for launching drun applications. Useful for session managers like 'uwsm app --' or sandboxing tools.",
+     CONFIG_DEFAULT},
 
     {xrm_Boolean,
      "disable-history",
