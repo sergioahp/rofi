@@ -291,11 +291,19 @@ void process_result(RofiViewState *state) {
       return;
     }
     // On exit, free current view, and pop to one above.
+    // In daemon mode, explicitly hide the window before cleanup
+    if (daemon_mode) {
+      rofi_view_hide();
+    }
     rofi_view_remove_active(state);
     rofi_view_free(state);
     return;
   }
   //    rofi_view_set_active ( NULL );
+  // In daemon mode, explicitly hide the window before cleanup
+  if (daemon_mode) {
+    rofi_view_hide();
+  }
   rofi_view_remove_active(state);
   rofi_view_free(state);
 }
@@ -1065,6 +1073,10 @@ static void rofi_daemon_cleanup(void) {
     g_free(daemon_socket_path);
     daemon_socket_path = NULL;
   }
+  // Clean up pidfile
+  if (pidfile != NULL) {
+    g_unlink(pidfile);
+  }
 }
 
 static gboolean main_loop_signal_handler_int(G_GNUC_UNUSED gpointer data) {
@@ -1314,7 +1326,9 @@ int main(int argc, char *argv[]) {
       has_show = TRUE;
       show_mode = NULL;
     }
-    if (has_show && rofi_daemon_forward_show_request(show_mode)) {
+    // Don't forward dmenu mode to daemon - it needs stdin
+    gboolean is_dmenu = (find_arg("-dmenu") >= 0);
+    if (has_show && !is_dmenu && rofi_daemon_forward_show_request(show_mode)) {
       return EXIT_SUCCESS;
     }
   }
@@ -1632,6 +1646,8 @@ int main(int argc, char *argv[]) {
   // Setup signal handling sources.
   // SIGINT
   g_unix_signal_add(SIGINT, main_loop_signal_handler_int, NULL);
+  // SIGTERM
+  g_unix_signal_add(SIGTERM, main_loop_signal_handler_int, NULL);
 
   g_idle_add(startup, NULL);
 
