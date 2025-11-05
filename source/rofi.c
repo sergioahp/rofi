@@ -159,6 +159,8 @@ static GSocketService *daemon_service = NULL;
 static gboolean daemon_socket_owned = FALSE;
 /** True when daemon is busy processing a request. */
 static gboolean daemon_busy = FALSE;
+/** True when display needs to be reinitialized before serving next request. */
+static gboolean daemon_display_needs_setup = FALSE;
 
 void process_result(RofiViewState *state);
 
@@ -294,18 +296,22 @@ void process_result(RofiViewState *state) {
     }
     // On exit, free current view, and pop to one above.
     rofi_view_remove_active(state);
-    rofi_view_free(state);
     if (daemon_mode) {
+      rofi_view_hide();
+      daemon_display_needs_setup = TRUE;
       daemon_busy = FALSE;
     }
+    rofi_view_free(state);
     return;
   }
   //    rofi_view_set_active ( NULL );
   rofi_view_remove_active(state);
-  rofi_view_free(state);
   if (daemon_mode) {
+    rofi_view_hide();
+    daemon_display_needs_setup = TRUE;
     daemon_busy = FALSE;
   }
+  rofi_view_free(state);
 }
 
 /**
@@ -829,6 +835,13 @@ static gboolean rofi_daemon_show_mode(const char *mode_name) {
       return FALSE;
     }
   }
+  if (daemon_display_needs_setup) {
+    if (!display_late_setup()) {
+      g_warning("Daemon request ignored: failed to set up display.");
+      return FALSE;
+    }
+    daemon_display_needs_setup = FALSE;
+  }
   if (daemon_busy) {
     g_debug("Daemon request ignored: daemon is busy processing another request.");
     return FALSE;
@@ -839,6 +852,11 @@ static gboolean rofi_daemon_show_mode(const char *mode_name) {
   }
   daemon_busy = TRUE;
   run_mode_index(index);
+  if (rofi_view_get_active() == NULL) {
+    daemon_display_needs_setup = TRUE;
+    daemon_busy = FALSE;
+    return FALSE;
+  }
   return TRUE;
 }
 
