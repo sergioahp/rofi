@@ -110,6 +110,7 @@ struct _display_buffer_pool {
 };
 
 static gboolean wayland_display_late_setup(void);
+static void wayland_replay_buffered_events(wayland_seat *self);
 
 static wayland_stuff wayland_;
 wayland_stuff *wayland = &wayland_;
