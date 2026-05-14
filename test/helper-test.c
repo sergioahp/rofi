@@ -35,6 +35,7 @@
 #include <assert.h>
 #include <glib.h>
 #include <helper.h>
+#include <limits.h>
 #include <locale.h>
 #include <stdio.h>
 #include <string.h>
@@ -188,19 +189,29 @@ int main(int argc, char **argv) {
     //        TASSERT ( utf8_strncmp ( in, "Valid", 3 ) == 0);
   }
   {
-    TASSERTL(
-        rofi_scorer_fuzzy_evaluate("aap noot mies", 12, "aap noot mies", 12, 0),
-        -605);
-    TASSERTL(rofi_scorer_fuzzy_evaluate("anm", 3, "aap noot mies", 12, 0),
-             -155);
-    TASSERTL(rofi_scorer_fuzzy_evaluate("blu", 3, "aap noot mies", 12, 0),
-             1073741824);
-    TASSERTL(rofi_scorer_fuzzy_evaluate("Anm", 3, "aap noot mies", 12, 1),
-             1073741754);
-    TASSERTL(rofi_scorer_fuzzy_evaluate("Anm", 3, "aap noot mies", 12, 0),
-             -155);
-    TASSERTL(rofi_scorer_fuzzy_evaluate("aap noot mies", 12, "Anm", 3, 0),
-             1073741824);
+    /* rofi_scorer_fuzzy_evaluate now delegates to fzf's FuzzyMatchV2. The
+     * exact scores depend on fzf's bonus constants; instead of asserting
+     * fixed numbers, assert ordering (smaller distance = better match) and
+     * the conventional INT_MAX/2 for no-match. */
+    int identical =
+        rofi_scorer_fuzzy_evaluate("aap noot mies", 12, "aap noot mies", 12, 0);
+    int acronym =
+        rofi_scorer_fuzzy_evaluate("anm", 3, "aap noot mies", 12, 0);
+    int miss =
+        rofi_scorer_fuzzy_evaluate("blu", 3, "aap noot mies", 12, 0);
+    int cs_miss =
+        rofi_scorer_fuzzy_evaluate("Anm", 3, "aap noot mies", 12, 1);
+    int ci_acronym =
+        rofi_scorer_fuzzy_evaluate("Anm", 3, "aap noot mies", 12, 0);
+    int reverse_miss =
+        rofi_scorer_fuzzy_evaluate("aap noot mies", 12, "Anm", 3, 0);
+    TASSERT(identical < 0);
+    TASSERT(acronym < 0);
+    TASSERT(identical < acronym);  /* full match outranks acronym */
+    TASSERT(miss == INT_MAX / 2);
+    TASSERT(cs_miss == INT_MAX / 2);
+    TASSERT(ci_acronym == acronym);
+    TASSERT(reverse_miss == INT_MAX / 2);
   }
 
   /**

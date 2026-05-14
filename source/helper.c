@@ -31,6 +31,7 @@
 #define G_LOG_DOMAIN "Helper"
 
 #include "display.h"
+#include "fzf.h"
 #include "helper-theme.h"
 #include "helper.h"
 #include "rofi.h"
@@ -55,7 +56,7 @@
 #include <unistd.h>
 
 const char *const MatchingMethodStr[MM_NUM_MATCHERS] = {
-    "Normal", "Regex", "Glob", "Fuzzy", "Prefix"};
+    "Normal", "Regex", "Glob", "Fuzzy", "Prefix", "FZF"};
 
 static int MatchingMethodEnabled[MM_NUM_MATCHERS] = {
     MM_NORMAL,
@@ -145,7 +146,10 @@ int helper_parse_setup(char *string, char ***output, int *length, ...) {
 
 void helper_tokenize_free(rofi_int_matcher **tokens) {
   for (size_t i = 0; tokens && tokens[i]; i++) {
-    g_regex_unref((GRegex *)tokens[i]->regex);
+    if (tokens[i]->regex) {
+      g_regex_unref((GRegex *)tokens[i]->regex);
+    }
+    g_free(tokens[i]->fzf_pattern);
     g_free(tokens[i]);
   }
   g_free(tokens);
@@ -242,6 +246,61 @@ static inline GRegex *R(const char *s, int case_sensitive) {
       s, G_REGEX_OPTIMIZE | ((case_sensitive) ? 0 : G_REGEX_CASELESS), 0, NULL);
 }
 
+/* For MM_FZF: parse a single token's fzf operator prefix/suffix (^, $, ', !)
+ * and populate `rv` with the chosen algorithm and the pattern's gunichar form.
+ * `input` is the token text AFTER the rofi negate char was stripped (the
+ * caller handles that). */
+static void fzf_build_matcher(rofi_int_matcher *rv, const char *input,
+                              int case_sensitive) {
+  RofiFzfKind kind = ROFI_FZF_KIND_FUZZY;
+  const char *text = input;
+  size_t text_len = strlen(text);
+
+  /* fzf parse order (pattern.go parseTerms): ! → $ → ' → ^. We mirror it for
+   * a single token. The rofi-level negation already stripped a leading '!'
+   * via matching_negate_char, so we only handle the remaining operators. */
+  if (text_len > 0 && text[text_len - 1] == '$' && !(text_len == 1)) {
+    kind = ROFI_FZF_KIND_SUFFIX;
+    text_len--;
+  }
+  if (text_len > 2 && text[0] == '\'' && text[text_len - 1] == '\'') {
+    /* 'foo' → exact substring with boundary check; we treat as plain exact. */
+    kind = ROFI_FZF_KIND_EXACT;
+    text++;
+    text_len -= 2;
+  } else if (text_len > 0 && text[0] == '\'') {
+    kind = ROFI_FZF_KIND_EXACT;
+    text++;
+    text_len--;
+  } else if (text_len > 0 && text[0] == '^') {
+    kind = (kind == ROFI_FZF_KIND_SUFFIX) ? ROFI_FZF_KIND_EQUAL
+                                          : ROFI_FZF_KIND_PREFIX;
+    text++;
+    text_len--;
+  }
+
+  char *pat_owned = g_strndup(text, text_len);
+  /* Normalize the pattern when config.normalize_match is on, so a user-typed
+   * accent (e.g. `dançô`) matches a normalized candidate (`Danco`). The
+   * candidate side is simplified in helper_token_match at match time. */
+  if (config.normalize_match) {
+    char *simplified = utf8_helper_simplify_string(pat_owned);
+    g_free(pat_owned);
+    pat_owned = simplified;
+  }
+  if (!case_sensitive) {
+    char *lower = g_utf8_strdown(pat_owned, -1);
+    g_free(pat_owned);
+    pat_owned = lower;
+  }
+  glong nchars = 0;
+  rv->fzf_pattern = fzf_utf8_to_runes(pat_owned, -1, &nchars);
+  rv->fzf_plen = nchars;
+  rv->fzf_kind = kind;
+  rv->fzf_case_sensitive = case_sensitive ? TRUE : FALSE;
+  g_free(pat_owned);
+}
+
 static rofi_int_matcher *create_regex(const char *input, int case_sensitive) {
   GRegex *retv = NULL;
   gchar *r;
@@ -274,6 +333,9 @@ static rofi_int_matcher *create_regex(const char *input, int case_sensitive) {
     retv = R(r, case_sensitive);
     g_free(r);
     break;
+  case MM_FZF:
+    fzf_build_matcher(rv, input, case_sensitive);
+    return rv;
   default:
     r = g_regex_escape_string(input, -1);
     retv = R(r, case_sensitive);
@@ -507,6 +569,50 @@ void helper_token_match_set_pango_attr_on_style(PangoAttrList *retv, int start,
   }
 }
 
+/* For fzf tokens, run the matcher with positions enabled and emit per-char
+ * pango attributes. Char indices come back from fzf; convert to byte offsets
+ * via g_utf8_offset_to_pointer (the slow path is fine — we only highlight the
+ * currently-displayed rows). */
+static void fzf_highlight_token(const rofi_int_matcher *t, const char *input,
+                                const gunichar *runes, glong nrunes,
+                                RofiHighlightColorStyle th, PangoAttrList *retv) {
+  int *pos = g_malloc_n((size_t)t->fzf_plen, sizeof(int));
+  int npos = 0;
+  int score = FZF_NO_MATCH;
+  switch (t->fzf_kind) {
+  case ROFI_FZF_KIND_EXACT:
+    score = fzf_exact_match(t->fzf_pattern, t->fzf_plen, runes, nrunes,
+                            t->fzf_case_sensitive, pos, &npos, NULL, NULL);
+    break;
+  case ROFI_FZF_KIND_PREFIX:
+    score = fzf_prefix_match(t->fzf_pattern, t->fzf_plen, runes, nrunes,
+                             t->fzf_case_sensitive, pos, &npos, NULL, NULL);
+    break;
+  case ROFI_FZF_KIND_SUFFIX:
+    score = fzf_suffix_match(t->fzf_pattern, t->fzf_plen, runes, nrunes,
+                             t->fzf_case_sensitive, pos, &npos, NULL, NULL);
+    break;
+  case ROFI_FZF_KIND_EQUAL:
+    score = fzf_equal_match(t->fzf_pattern, t->fzf_plen, runes, nrunes,
+                            t->fzf_case_sensitive, pos, &npos, NULL, NULL);
+    break;
+  case ROFI_FZF_KIND_FUZZY:
+  default:
+    score = fzf_fuzzy_match_v2(t->fzf_pattern, t->fzf_plen, runes, nrunes,
+                               t->fzf_case_sensitive, pos, &npos, NULL, NULL);
+    break;
+  }
+  if (score != FZF_NO_MATCH) {
+    for (int i = 0; i < npos; i++) {
+      const char *p_start = g_utf8_offset_to_pointer(input, pos[i]);
+      const char *p_end = g_utf8_offset_to_pointer(p_start, 1);
+      helper_token_match_set_pango_attr_on_style(retv, (int)(p_start - input),
+                                                 (int)(p_end - input), th);
+    }
+  }
+  g_free(pos);
+}
+
 PangoAttrList *helper_token_match_get_pango_attr(RofiHighlightColorStyle th,
                                                  rofi_int_matcher **tokens,
                                                  const char *input,
@@ -515,47 +621,123 @@ PangoAttrList *helper_token_match_get_pango_attr(RofiHighlightColorStyle th,
   if (config.normalize_match) {
     return retv;
   }
-  // Do a tokenized match.
-  if (tokens) {
-    for (int j = 0; tokens[j]; j++) {
-      GMatchInfo *gmi = NULL;
-      if (tokens[j]->invert) {
-        continue;
-      }
-      g_regex_match(tokens[j]->regex, input, G_REGEX_MATCH_PARTIAL, &gmi);
-      while (g_match_info_matches(gmi)) {
-        int count = g_match_info_get_match_count(gmi);
-        for (int index = (count > 1) ? 1 : 0; index < count; index++) {
-          int start, end;
-          g_match_info_fetch_pos(gmi, index, &start, &end);
-          helper_token_match_set_pango_attr_on_style(retv, start, end, th);
-        }
-        g_match_info_next(gmi, NULL);
-      }
-      g_match_info_free(gmi);
+  if (!tokens) {
+    return retv;
+  }
+
+  gunichar *runes = NULL;
+  glong nrunes = 0;
+  gboolean need_runes = FALSE;
+  for (int j = 0; tokens[j]; j++) {
+    if (tokens[j]->fzf_pattern && !tokens[j]->invert) {
+      need_runes = TRUE;
+      break;
     }
   }
+  if (need_runes) {
+    runes = fzf_utf8_to_runes(input, -1, &nrunes);
+  }
+
+  for (int j = 0; tokens[j]; j++) {
+    if (tokens[j]->invert) {
+      continue;
+    }
+    if (tokens[j]->fzf_pattern) {
+      fzf_highlight_token(tokens[j], input, runes, nrunes, th, retv);
+      continue;
+    }
+    GMatchInfo *gmi = NULL;
+    g_regex_match(tokens[j]->regex, input, G_REGEX_MATCH_PARTIAL, &gmi);
+    while (g_match_info_matches(gmi)) {
+      int count = g_match_info_get_match_count(gmi);
+      for (int index = (count > 1) ? 1 : 0; index < count; index++) {
+        int start, end;
+        g_match_info_fetch_pos(gmi, index, &start, &end);
+        helper_token_match_set_pango_attr_on_style(retv, start, end, th);
+      }
+      g_match_info_next(gmi, NULL);
+    }
+    g_match_info_free(gmi);
+  }
+
+  g_free(runes);
   return retv;
+}
+
+/* Run a single token's matcher against the candidate. Returns TRUE on match.
+ * Caller is responsible for `invert` semantics. */
+static int helper_token_match_one(const rofi_int_matcher *t, const char *input,
+                                  const gunichar *input_runes,
+                                  glong input_nrunes) {
+  if (t->regex) {
+    return g_regex_match(t->regex, input, 0, NULL);
+  }
+  if (t->fzf_pattern) {
+    int score;
+    const gboolean cs = t->fzf_case_sensitive;
+    switch (t->fzf_kind) {
+    case ROFI_FZF_KIND_EXACT:
+      score = fzf_exact_match(t->fzf_pattern, t->fzf_plen, input_runes,
+                              input_nrunes, cs, NULL, NULL, NULL, NULL);
+      break;
+    case ROFI_FZF_KIND_PREFIX:
+      score = fzf_prefix_match(t->fzf_pattern, t->fzf_plen, input_runes,
+                               input_nrunes, cs, NULL, NULL, NULL, NULL);
+      break;
+    case ROFI_FZF_KIND_SUFFIX:
+      score = fzf_suffix_match(t->fzf_pattern, t->fzf_plen, input_runes,
+                               input_nrunes, cs, NULL, NULL, NULL, NULL);
+      break;
+    case ROFI_FZF_KIND_EQUAL:
+      score = fzf_equal_match(t->fzf_pattern, t->fzf_plen, input_runes,
+                              input_nrunes, cs, NULL, NULL, NULL, NULL);
+      break;
+    case ROFI_FZF_KIND_FUZZY:
+    default:
+      score = fzf_fuzzy_match_v2(t->fzf_pattern, t->fzf_plen, input_runes,
+                                 input_nrunes, cs, NULL, NULL, NULL, NULL);
+      break;
+    }
+    return score != FZF_NO_MATCH;
+  }
+  return FALSE;
 }
 
 int helper_token_match(rofi_int_matcher *const *tokens, const char *input) {
   int match = TRUE;
-  // Do a tokenized match.
-  if (tokens) {
-    if (config.normalize_match) {
-      char *r = utf8_helper_simplify_string(input);
-      for (int j = 0; match && tokens[j]; j++) {
-        match = g_regex_match(tokens[j]->regex, r, 0, NULL);
-        match ^= tokens[j]->invert;
-      }
-      g_free(r);
-    } else {
-      for (int j = 0; match && tokens[j]; j++) {
-        match = g_regex_match(tokens[j]->regex, input, 0, NULL);
-        match ^= tokens[j]->invert;
-      }
-    }
+  if (!tokens) return match;
+
+  /* Decode UTF-8 once if any token is fzf-based. */
+  gunichar *runes = NULL;
+  glong nrunes = 0;
+  gboolean need_runes = FALSE;
+  for (int j = 0; tokens[j]; j++) {
+    if (tokens[j]->fzf_pattern) { need_runes = TRUE; break; }
   }
+
+  char *normalized = NULL;
+  const char *use_input = input;
+  if (config.normalize_match) {
+    normalized = utf8_helper_simplify_string(input);
+    use_input = normalized;
+  }
+  if (need_runes) {
+    runes = fzf_utf8_to_runes(use_input, -1, &nrunes);
+  }
+
+  for (int j = 0; match && tokens[j]; j++) {
+    if (config.normalize_match && tokens[j]->regex) {
+      match = g_regex_match(tokens[j]->regex, use_input, 0, NULL);
+    } else if (tokens[j]->regex) {
+      match = g_regex_match(tokens[j]->regex, input, 0, NULL);
+    } else {
+      match = helper_token_match_one(tokens[j], use_input, runes, nrunes);
+    }
+    match ^= tokens[j]->invert;
+  }
+
+  g_free(runes);
+  g_free(normalized);
   return match;
 }
 
@@ -718,7 +900,7 @@ int config_sanity_check(void) {
           g_string_append_printf(msg,
                                  "\t<b>config.matching</b>=%s is not a valid "
                                  "matching strategy.\nValid options are: glob, "
-                                 "regex, fuzzy, prefix or normal.\n",
+                                 "regex, fuzzy, prefix, normal or fzf.\n",
                                  *str);
           found_error = 1;
         }
@@ -885,141 +1067,33 @@ char *rofi_force_utf8(const gchar *data, ssize_t length) {
   return g_string_free(string, FALSE);
 }
 
-/****
- * FZF like scorer
+/*
+ * Scoring for sorting_method=fzf: delegate to the faithful fzf algorithm.
+ * Rofi sorts ascending by "distance" (smaller = better), so we return
+ * -score from fzf. Non-match → INT_MAX/2 (treated as "infinitely far",
+ * which in practice doesn't happen because only matched candidates reach
+ * this function).
  */
-
-/** Max length of input to score. */
-#define FUZZY_SCORER_MAX_LENGTH 256
-/** minimum score */
-#define MIN_SCORE (INT_MIN / 2)
-/** Leading gap score */
-#define LEADING_GAP_SCORE -4
-/** gap score */
-#define GAP_SCORE -5
-/** start of word score */
-#define WORD_START_SCORE 50
-/** non-word score */
-#define NON_WORD_SCORE 40
-/** CamelCase score */
-#define CAMEL_SCORE (WORD_START_SCORE + GAP_SCORE - 1)
-/** Consecutive score */
-#define CONSECUTIVE_SCORE (WORD_START_SCORE + GAP_SCORE)
-/** non-start multiplier */
-#define PATTERN_NON_START_MULTIPLIER 1
-/** start multiplier */
-#define PATTERN_START_MULTIPLIER 2
-
-/**
- * Character classification.
- */
-enum CharClass {
-  /* Lower case */
-  LOWER,
-  /* Upper case */
-  UPPER,
-  /* Number */
-  DIGIT,
-  /* non word character */
-  NON_WORD
-};
-
-/**
- * @param c The character to determine class of
- *
- * @returns the class of the character c.
- */
-static enum CharClass rofi_scorer_get_character_class(gunichar c) {
-  if (g_unichar_islower(c)) {
-    return LOWER;
-  }
-  if (g_unichar_isupper(c)) {
-    return UPPER;
-  }
-  if (g_unichar_isdigit(c)) {
-    return DIGIT;
-  }
-  return NON_WORD;
-}
-
-/**
- * @param prev The previous character.
- * @param curr The current character
- *
- * Scrore the transition.
- *
- * @returns score of the transition.
- */
-static int rofi_scorer_get_score_for(enum CharClass prev, enum CharClass curr) {
-  if (prev == NON_WORD && curr != NON_WORD) {
-    return WORD_START_SCORE;
-  }
-  if ((prev == LOWER && curr == UPPER) || (prev != DIGIT && curr == DIGIT)) {
-    return CAMEL_SCORE;
-  }
-  if (curr == NON_WORD) {
-    return NON_WORD_SCORE;
-  }
-  return 0;
-}
-
 int rofi_scorer_fuzzy_evaluate(const char *pattern, glong plen, const char *str,
                                glong slen, int case_sensitive) {
-  if (slen > FUZZY_SCORER_MAX_LENGTH) {
-    return -MIN_SCORE;
+  (void)plen;
+  (void)slen;
+  char *pat_owned = NULL;
+  const char *pat_use = pattern;
+  if (!case_sensitive) {
+    pat_owned = g_utf8_strdown(pattern, -1);
+    pat_use = pat_owned;
   }
-  glong pi, si;
-  // whether we are aligning the first character of pattern
-  gboolean pfirst = TRUE;
-  // whether the start of a word in pattern
-  gboolean pstart = TRUE;
-  // score for each position
-  int *score = g_malloc_n(slen, sizeof(int));
-  // dp[i]: maximum value by aligning pattern[0..pi] to str[0..si]
-  int *dp = g_malloc_n(slen, sizeof(int));
-  // uleft: value of the upper left cell; ulefts: maximum value of uleft and
-  // cells on the left. The arbitrary initial values suppress warnings.
-  int uleft = 0, ulefts = 0, left, lefts;
-  const gchar *pit = pattern, *sit;
-  enum CharClass prev = NON_WORD;
-  for (si = 0, sit = str; si < slen; si++, sit = g_utf8_next_char(sit)) {
-    enum CharClass cur = rofi_scorer_get_character_class(g_utf8_get_char(sit));
-    score[si] = rofi_scorer_get_score_for(prev, cur);
-    prev = cur;
-    dp[si] = MIN_SCORE;
-  }
-  for (pi = 0; pi < plen; pi++, pit = g_utf8_next_char(pit)) {
-    gunichar pc = g_utf8_get_char(pit), sc;
-    if (g_unichar_isspace(pc)) {
-      pstart = TRUE;
-      continue;
-    }
-    lefts = MIN_SCORE;
-    for (si = 0, sit = str; si < slen; si++, sit = g_utf8_next_char(sit)) {
-      left = dp[si];
-      lefts = MAX(lefts + GAP_SCORE, left);
-      sc = g_utf8_get_char(sit);
-      if (case_sensitive ? pc == sc
-                         : g_unichar_tolower(pc) == g_unichar_tolower(sc)) {
-        int t = score[si] * (pstart ? PATTERN_START_MULTIPLIER
-                                    : PATTERN_NON_START_MULTIPLIER);
-        dp[si] = pfirst ? LEADING_GAP_SCORE * si + t
-                        : MAX(uleft + CONSECUTIVE_SCORE, ulefts + t);
-      } else {
-        dp[si] = MIN_SCORE;
-      }
-      uleft = left;
-      ulefts = lefts;
-    }
-    pfirst = pstart = FALSE;
-  }
-  lefts = MIN_SCORE;
-  for (si = 0; si < slen; si++) {
-    lefts = MAX(lefts + GAP_SCORE, dp[si]);
-  }
-  g_free(score);
-  g_free(dp);
-  return -lefts;
+  glong p_n = 0, s_n = 0;
+  gunichar *p = fzf_utf8_to_runes(pat_use, -1, &p_n);
+  gunichar *s = fzf_utf8_to_runes(str, -1, &s_n);
+  int score = fzf_fuzzy_match_v2(p, p_n, s, s_n, case_sensitive,
+                                 NULL, NULL, NULL, NULL);
+  g_free(p);
+  g_free(s);
+  g_free(pat_owned);
+  if (score == FZF_NO_MATCH) return INT_MAX / 2;
+  return -score;
 }
 
 /**

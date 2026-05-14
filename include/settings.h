@@ -41,7 +41,8 @@ typedef enum {
   MM_GLOB = 2,
   MM_FUZZY = 3,
   MM_PREFIX = 4,
-  MM_NUM_MATCHERS = 5
+  MM_FZF = 5,
+  MM_NUM_MATCHERS = 6
 } MatchingMethod;
 
 /**

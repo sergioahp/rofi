@@ -57,6 +57,7 @@
 #include "rofi.h"
 #include "settings.h"
 
+#include "fzf.h"
 #include "helper.h"
 #include "mode.h"
 #include "modes/modes.h"
@@ -943,6 +944,7 @@ static void rofi_custom_log_function(const char *log_domain,
  * @returns return code of rofi.
  */
 int main(int argc, char *argv[]) {
+  fzf_init();
   cmd_set_arguments(argc, argv);
   if (find_arg("-log") >= 0) {
     char *logfile = NULL;

@@ -354,9 +354,27 @@ typedef struct rofi_range_pair {
 
 /**
  * Internal structure for matching.
+ *
+ * One of `regex` / `fzf_pattern` is set, depending on config.matching_method:
+ *   - MM_FZF stores the pre-decoded pattern in `fzf_pattern` (so we don't
+ *     re-decode UTF-8 on every candidate) and selects the algorithm via
+ *     `fzf_kind`.
+ *   - all other modes store a compiled GRegex.
  */
+typedef enum {
+  ROFI_FZF_KIND_FUZZY = 0,
+  ROFI_FZF_KIND_EXACT = 1,
+  ROFI_FZF_KIND_PREFIX = 2,
+  ROFI_FZF_KIND_SUFFIX = 3,
+  ROFI_FZF_KIND_EQUAL = 4,
+} RofiFzfKind;
+
 typedef struct rofi_int_matcher_t {
   GRegex *regex;
+  gunichar *fzf_pattern;
+  glong fzf_plen;
+  RofiFzfKind fzf_kind;
+  gboolean fzf_case_sensitive;
   gboolean invert;
 } rofi_int_matcher;
 
