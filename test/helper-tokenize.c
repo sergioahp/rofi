@@ -387,6 +387,114 @@ START_TEST(test_tokenizer_match_regex_single_two_word_till_end) {
 }
 END_TEST
 
+START_TEST(test_tokenizer_match_fzf_single) {
+  config.matching_method = MM_FZF;
+  rofi_int_matcher **tokens = helper_tokenize("noot", FALSE);
+  ck_assert_int_eq(helper_token_match(tokens, "aap noot mies"), TRUE);
+  ck_assert_int_eq(helper_token_match(tokens, "n o o t"),       TRUE); /* fuzzy */
+  ck_assert_int_eq(helper_token_match(tokens, "aap mies"),      FALSE);
+  ck_assert_int_eq(helper_token_match(tokens, "aap Noot mies"), TRUE); /* ci */
+  helper_tokenize_free(tokens);
+
+  tokens = helper_tokenize("noot", TRUE);
+  ck_assert_int_eq(helper_token_match(tokens, "aap Noot mies"), FALSE); /* cs */
+  helper_tokenize_free(tokens);
+}
+END_TEST
+
+START_TEST(test_tokenizer_match_fzf_prefix_suffix) {
+  config.matching_method = MM_FZF;
+  rofi_int_matcher **tokens = helper_tokenize("^noot", FALSE);
+  ck_assert_int_eq(helper_token_match(tokens, "noot mies"),     TRUE);
+  ck_assert_int_eq(helper_token_match(tokens, "aap noot mies"), FALSE);
+  helper_tokenize_free(tokens);
+
+  tokens = helper_tokenize("noot$", FALSE);
+  ck_assert_int_eq(helper_token_match(tokens, "aap noot"),      TRUE);
+  ck_assert_int_eq(helper_token_match(tokens, "aap noot mies"), FALSE);
+  helper_tokenize_free(tokens);
+
+  tokens = helper_tokenize("^noot$", FALSE);
+  ck_assert_int_eq(helper_token_match(tokens, "noot"),          TRUE);
+  ck_assert_int_eq(helper_token_match(tokens, "nootap"),        FALSE);
+  helper_tokenize_free(tokens);
+}
+END_TEST
+
+START_TEST(test_tokenizer_match_fzf_exact) {
+  config.matching_method = MM_FZF;
+  /* 'foo turns fuzzy off — only contiguous substring matches. */
+  rofi_int_matcher **tokens = helper_tokenize("'noot", FALSE);
+  ck_assert_int_eq(helper_token_match(tokens, "aap noot mies"), TRUE);
+  ck_assert_int_eq(helper_token_match(tokens, "n o o t"),       FALSE);
+  helper_tokenize_free(tokens);
+}
+END_TEST
+
+START_TEST(test_tokenizer_match_fzf_negate) {
+  /* Rofi's matching_negate_char is '-' by default. */
+  config.matching_method = MM_FZF;
+  rofi_int_matcher **tokens = helper_tokenize("-noot", FALSE);
+  ck_assert_int_eq(helper_token_match(tokens, "aap noot mies"), FALSE);
+  ck_assert_int_eq(helper_token_match(tokens, "aap mies"),      TRUE);
+  helper_tokenize_free(tokens);
+}
+END_TEST
+
+START_TEST(test_tokenizer_match_fzf_alternation) {
+  config.matching_method = MM_FZF;
+  /* `foo | bar` — match if either alternative hits. */
+  rofi_int_matcher **tokens = helper_tokenize("noot | mies", FALSE);
+  ck_assert_int_eq(helper_token_match(tokens, "aap noot ding"), TRUE);
+  ck_assert_int_eq(helper_token_match(tokens, "aap ding mies"), TRUE);
+  ck_assert_int_eq(helper_token_match(tokens, "aap mies noot"), TRUE);
+  ck_assert_int_eq(helper_token_match(tokens, "aap ding"),      FALSE);
+  helper_tokenize_free(tokens);
+
+  /* Three-way `a | b | c`. */
+  tokens = helper_tokenize("noot | mies | aap", FALSE);
+  ck_assert_int_eq(helper_token_match(tokens, "aap"),    TRUE);
+  ck_assert_int_eq(helper_token_match(tokens, "ding"),   FALSE);
+  helper_tokenize_free(tokens);
+}
+END_TEST
+
+START_TEST(test_tokenizer_match_fzf_alternation_mixed) {
+  config.matching_method = MM_FZF;
+  /* `(noot | mies) AND aap` — first set is OR, second is required. */
+  rofi_int_matcher **tokens = helper_tokenize("noot | mies aap", FALSE);
+  ck_assert_int_eq(helper_token_match(tokens, "aap noot ding"), TRUE);
+  ck_assert_int_eq(helper_token_match(tokens, "aap mies ding"), TRUE);
+  ck_assert_int_eq(helper_token_match(tokens, "aap ding"),      FALSE);
+  ck_assert_int_eq(helper_token_match(tokens, "noot ding"),     FALSE); /* aap missing */
+  ck_assert_int_eq(helper_token_match(tokens, "mies ding"),     FALSE);
+  helper_tokenize_free(tokens);
+
+  /* `aap AND (noot | mies)` — same logical query, different ordering. */
+  tokens = helper_tokenize("aap noot | mies", FALSE);
+  ck_assert_int_eq(helper_token_match(tokens, "aap noot ding"), TRUE);
+  ck_assert_int_eq(helper_token_match(tokens, "aap mies ding"), TRUE);
+  ck_assert_int_eq(helper_token_match(tokens, "noot ding"),     FALSE);
+  helper_tokenize_free(tokens);
+}
+END_TEST
+
+START_TEST(test_tokenizer_match_fzf_alternation_edges) {
+  config.matching_method = MM_FZF;
+  /* Leading "|" has no previous set to OR with — ignore it. */
+  rofi_int_matcher **tokens = helper_tokenize("| noot", FALSE);
+  ck_assert_int_eq(helper_token_match(tokens, "aap noot"),  TRUE);
+  ck_assert_int_eq(helper_token_match(tokens, "aap ding"),  FALSE);
+  helper_tokenize_free(tokens);
+
+  /* Trailing "|" — no following term, ignore. */
+  tokens = helper_tokenize("noot |", FALSE);
+  ck_assert_int_eq(helper_token_match(tokens, "aap noot"),  TRUE);
+  ck_assert_int_eq(helper_token_match(tokens, "aap ding"),  FALSE);
+  helper_tokenize_free(tokens);
+}
+END_TEST
+
 static Suite *helper_tokenizer_suite(void) {
   Suite *s;
 
@@ -426,6 +534,17 @@ static Suite *helper_tokenizer_suite(void) {
     tcase_add_test(tc_fuzzy, test_tokenizer_match_fuzzy_multiple_ci);
     tcase_add_test(tc_fuzzy, test_tokenizer_match_fuzzy_multiple_ci_split);
     suite_add_tcase(s, tc_fuzzy);
+  }
+  {
+    TCase *tc_fzf = tcase_create("FZF");
+    tcase_add_test(tc_fzf, test_tokenizer_match_fzf_single);
+    tcase_add_test(tc_fzf, test_tokenizer_match_fzf_prefix_suffix);
+    tcase_add_test(tc_fzf, test_tokenizer_match_fzf_exact);
+    tcase_add_test(tc_fzf, test_tokenizer_match_fzf_negate);
+    tcase_add_test(tc_fzf, test_tokenizer_match_fzf_alternation);
+    tcase_add_test(tc_fzf, test_tokenizer_match_fzf_alternation_mixed);
+    tcase_add_test(tc_fzf, test_tokenizer_match_fzf_alternation_edges);
+    suite_add_tcase(s, tc_fzf);
   }
   {
     TCase *tc_regex = tcase_create("Regex");

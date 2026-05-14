@@ -371,10 +371,21 @@ rofi_int_matcher **helper_tokenize(const char *input, int case_sensitive) {
   // Iterate over tokens.
   // strtok should still be valid for utf8.
   const char *const sep = " ";
+  /* For MM_FZF only: a bare "|" between tokens joins them into one term set
+   * (OR'd within the set, AND'd across sets). Mirrors fzf's parseTerms. */
+  gboolean pending_or = FALSE;
   for (token = strtok_r(str, sep, &saveptr); token != NULL;
        token = strtok_r(NULL, sep, &saveptr)) {
+    if (config.matching_method == MM_FZF && strcmp(token, "|") == 0) {
+      if (num_tokens > 0) {
+        pending_or = TRUE;
+      }
+      continue;
+    }
     retv = g_realloc(retv, sizeof(rofi_int_matcher *) * (num_tokens + 2));
     retv[num_tokens] = create_regex(token, case_sensitive);
+    retv[num_tokens]->or_with_prev = pending_or;
+    pending_or = FALSE;
     retv[num_tokens + 1] = NULL;
     num_tokens++;
   }
@@ -704,8 +715,7 @@ static int helper_token_match_one(const rofi_int_matcher *t, const char *input,
 }
 
 int helper_token_match(rofi_int_matcher *const *tokens, const char *input) {
-  int match = TRUE;
-  if (!tokens) return match;
+  if (!tokens) return TRUE;
 
   /* Decode UTF-8 once if any token is fzf-based. */
   gunichar *runes = NULL;
@@ -725,20 +735,36 @@ int helper_token_match(rofi_int_matcher *const *tokens, const char *input) {
     runes = fzf_utf8_to_runes(use_input, -1, &nrunes);
   }
 
-  for (int j = 0; match && tokens[j]; j++) {
-    if (config.normalize_match && tokens[j]->regex) {
-      match = g_regex_match(tokens[j]->regex, use_input, 0, NULL);
-    } else if (tokens[j]->regex) {
-      match = g_regex_match(tokens[j]->regex, input, 0, NULL);
-    } else {
-      match = helper_token_match_one(tokens[j], use_input, runes, nrunes);
+  /* AND across term sets, OR within a set. A set starts at any matcher with
+   * or_with_prev=FALSE and continues until the next such matcher. */
+  gboolean overall = TRUE;
+  gboolean set_matched = FALSE;
+  gboolean set_started = FALSE;
+  for (int j = 0; tokens[j]; j++) {
+    if (!tokens[j]->or_with_prev) {
+      if (set_started && !set_matched) {
+        overall = FALSE;
+        break;
+      }
+      set_started = TRUE;
+      set_matched = FALSE;
     }
-    match ^= tokens[j]->invert;
+    int m;
+    if (config.normalize_match && tokens[j]->regex) {
+      m = g_regex_match(tokens[j]->regex, use_input, 0, NULL);
+    } else if (tokens[j]->regex) {
+      m = g_regex_match(tokens[j]->regex, input, 0, NULL);
+    } else {
+      m = helper_token_match_one(tokens[j], use_input, runes, nrunes);
+    }
+    m ^= tokens[j]->invert;
+    if (m) set_matched = TRUE;
   }
+  if (overall && set_started && !set_matched) overall = FALSE;
 
   g_free(runes);
   g_free(normalized);
-  return match;
+  return overall;
 }
 
 int execute_generator(const char *cmd) {

@@ -376,6 +376,10 @@ typedef struct rofi_int_matcher_t {
   RofiFzfKind fzf_kind;
   gboolean fzf_case_sensitive;
   gboolean invert;
+  /* MM_FZF only: this term OR-joins with the previous matcher (i.e., they
+   * belong to the same term set). Tokens not flagged start a new set.
+   * Matching: AND across sets, OR within a set. */
+  gboolean or_with_prev;
 } rofi_int_matcher;
 
 /**
