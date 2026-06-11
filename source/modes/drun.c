@@ -418,7 +418,13 @@ static void exec_cmd_entry(DRunModePrivateData *pd, DRunModeEntry *e,
 
   gboolean launched = FALSE;
 
-  if (pd->disable_giolaunch == FALSE) {
+  /* A launch prefix has to wrap the command line, which is only possible
+   * through the exec path below. GIO launches a GAppInfo, not a command line,
+   * so it cannot apply the prefix; skip it when a prefix is configured. */
+  gboolean use_launch_prefix = (config.drun_launch_prefix != NULL &&
+                                *config.drun_launch_prefix != '\0');
+
+  if (pd->disable_giolaunch == FALSE && use_launch_prefix == FALSE) {
     GDesktopAppInfo *gdai = g_desktop_app_info_new_from_keyfile(e->key_file);
 
     if (gdai != NULL) {
@@ -462,8 +468,17 @@ static void exec_cmd_entry(DRunModePrivateData *pd, DRunModeEntry *e,
     // terminal.
     gboolean terminal =
         g_key_file_get_boolean(e->key_file, e->action, "Terminal", NULL);
-    launched = helper_execute_command_env(exec_path, fp, terminal,
+
+    const gchar *command = fp;
+    gchar *prefixed_command = NULL;
+    if (use_launch_prefix) {
+      prefixed_command =
+          g_strdup_printf("%s %s", config.drun_launch_prefix, fp);
+      command = prefixed_command;
+    }
+    launched = helper_execute_command_env(exec_path, command, terminal,
                                           sn ? &context : NULL, envp);
+    g_free(prefixed_command);
 
     g_strfreev(envp);
   }

@@ -138,6 +138,8 @@ typedef struct {
   char *drun_display_format;
   /** Desktop Link launch command */
   char *drun_url_launcher;
+  /** Command prefix prepended when launching a desktop entry */
+  char *drun_launch_prefix;
 
   /** Search case sensitivity */
   unsigned int case_sensitive;

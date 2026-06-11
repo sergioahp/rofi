@@ -876,6 +876,16 @@ desktop files.
 
 Command to open a Desktop Entry that is a Link.
 
+`-drun-launch-prefix` *prefix*
+
+Command prefix prepended to a Desktop Entry's command when launching it, for
+example `uwsm app --` or `systemd-run --user --scope --`. This is useful with
+Wayland session managers that need applications launched as their own scopes
+or services rather than as children of **rofi**.
+
+When this is set, **rofi** bypasses GIO launching (which cannot apply a command
+prefix) and runs the entry through the prefix instead. Unset by default.
+
 `-pid` *path*
 
 Make **rofi** create a pid file and check this on startup. The pid file

@@ -328,6 +328,15 @@ static XrmOption xrmOptions[] = {
         NULL,
         "Command to open a Desktop Entry that is a Link.",
     },
+    {
+        xrm_String,
+        CONFIG_DEFAULT,
+        "drun-launch-prefix",
+        {.str = &config.drun_launch_prefix},
+        NULL,
+        "Command prefix prepended when launching a Desktop Entry (e.g. 'uwsm "
+        "app --'). Bypasses GIO launching so the entry runs through the prefix.",
+    },
 
     {
         xrm_Boolean,

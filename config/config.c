@@ -142,6 +142,8 @@ Settings config = {
         "{name} [<span weight='light' size='small'><i>({generic})</i></span>]",
     /** Desktop Link launch command */
     .drun_url_launcher = "xdg-open",
+    /** Command prefix prepended when launching a desktop entry */
+    .drun_launch_prefix = NULL,
 
     /** Window fields to match in window mode*/
     .window_match_fields = "all",
